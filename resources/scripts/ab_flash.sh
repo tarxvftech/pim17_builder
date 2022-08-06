@@ -1,5 +1,7 @@
 #!/bin/sh
 set -e
+echo "DO NOT USE"
+return
 
 image_file="$1"
 

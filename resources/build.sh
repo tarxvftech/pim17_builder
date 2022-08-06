@@ -12,11 +12,10 @@ set -e
 : "${DEFAULT_ROOT_PASSWORD:="alpine"}"
 : "${DEFAULT_DROPBEAR_ENABLED:="true"}"
 : "${DEFAULT_KERNEL_MODULES:=""}"
-: "${UBOOT_COUNTER_RESET_ENABLED:="true"}"
 : "${ARCH:="armv7"}"
 : "${RPI_FIRMWARE_BRANCH:="stable"}"
 : "${RPI_FIRMWARE_GIT:="https://github.com/raspberrypi/firmware"}"
-: "${CMDLINE:="console=serial0,115200 console=tty1 root=/dev/root rootfstype=ext4 fsck.repair=yes ro rootwait quiet"}"
+: "${CMDLINE:="console=tty1 root=/dev/mmcblk0p2 rootfstype=ext4 fsck.repair=yes ro rootwait quiet"}"
 : "${DEV:="mdev"}"
 
 : "${SIZE_BOOT:="100M"}"
@@ -98,15 +97,27 @@ download_firmware() {
 # arch specific
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
+echo "ARCH = $ARCH"
 case "$ARCH" in
-  armhf)   KERNEL_PACKAGES="linux-rpi linux-rpi2" ;;
-  armv7)   KERNEL_PACKAGES="linux-rpi2 linux-rpi4" ;;
-  aarch64) KERNEL_PACKAGES="linux-rpi4" ;;
+  armhf)   
+    KERNEL_PACKAGES="linux-rpi linux-rpi2" 
+    echo i have armhf for arch
+    ;;
+  armv7)   
+    KERNEL_PACKAGES="linux-rpi2 linux-rpi4" 
+    echo i have armv7 for arch
+    ;;
+  aarch64) 
+    KERNEL_PACKAGES="linux-rpi4" 
+    echo i have aarch64 for arch
+    ;;
 esac
 
 case ${RPI_FIRMWARE_BRANCH} in
   alpine) KERNEL_PACKAGES="$KERNEL_PACKAGES raspberrypi-bootloader raspberrypi-bootloader-cutdown" ;;
 esac
+
+echo "Kernel Packages: $KERNEL_PACKAGES"
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # create root FS
@@ -169,12 +180,12 @@ sed -E "s/eval echo .IF_DHCP_HOSTNAME/cat \/etc\/hostname/" -i ${ROOTFS_PATH}/us
 
 # add script to resize data partition
 install -D ${RES_PATH}/scripts/resizedata.sh ${ROOTFS_PATH}/sbin/ab_resizedata
+#install -D ${RES_PATH}/scripts/resizeroot.sh ${ROOTFS_PATH}/sbin/ab_resizeroot
 
 # copy fstab
 install -m 644 ${RES_PATH}/fstab ${ROOTFS_PATH}/etc/fstab
 
 # prepare mount points
-mkdir -p ${ROOTFS_PATH}/uboot
 mkdir -p ${ROOTFS_PATH}/data
 mkdir -p ${ROOTFS_PATH}/proc
 mkdir -p ${ROOTFS_PATH}/sys
@@ -191,6 +202,9 @@ chroot_exec rc-update add ab_clock default
 echo 'clock_file="/data/etc/ab_clock_saved_time"' > ${ROOTFS_PATH}/etc/conf.d/ab_clock
 chroot_exec rc-update add ntpd default
 
+install ${RES_PATH}/scripts/wifi_adder.sh ${ROOTFS_PATH}/etc/init.d/wifi_adder
+chroot_exec rc-update add wifi_adder default
+
 # kernel modules
 chroot_exec rc-update add modules default
 
@@ -200,8 +214,6 @@ chroot_exec rc-update add rngd sysinit
 # device manager service for device creation and /dev/stderr etc
 case ${DEV} in
   eudev) chroot_exec setup-udev -n
-         install ${RES_PATH}/scripts/ab_root.sh ${ROOTFS_PATH}/etc/init.d/ab_root
-         chroot_exec rc-update add ab_root default
          if [ "$DEFAULT_KERNEL_MODULES" != "*" ]; then
            DEFAULT_KERNEL_MODULES="$DEFAULT_KERNEL_MODULES uio bcm2835-mmal-vchiq brcmutil cfg80211 videobuf2-vmalloc videobuf2-dma-contig v4l2-mem2mem"
          fi ;;
@@ -253,16 +265,9 @@ mkdir -p ${DATAFS_PATH}/root/
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
-# uboot tools
-install /uboot_tool ${ROOTFS_PATH}/sbin/uboot_tool
 
-if [ "$UBOOT_COUNTER_RESET_ENABLED" = "true" ]; then
-  # mark system as booted (should be moved to application)
-  install ${RES_PATH}/scripts/99-uboot.sh ${ROOTFS_PATH}/etc/local.d/99-uboot.start
-fi
 
 # copy helper scripts
-install ${RES_PATH}/scripts/ab_active.sh ${ROOTFS_PATH}/sbin/ab_active
 install ${RES_PATH}/scripts/ab_flash.sh ${ROOTFS_PATH}/sbin/ab_flash
 
 # dropbear
@@ -302,77 +307,54 @@ EOF
 ln -fs /data/etc/shadow ${ROOTFS_PATH}/etc/shadow
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
-colour_echo ">> Prepare kernel for uboot"
-
-# build uImage
-
-# uImage2 is for armhf and armv7 only
-if [ "$ARCH" != "aarch64" ]; then
-  mkimage -A arm -O linux -T kernel -C none -a 0x00200000 -e 0x00200000 -n "Linux kernel" \
-   -d "$ROOTFS_PATH"/boot/vmlinuz-rpi2 "$ROOTFS_PATH"/boot/uImage2
-fi
-
-# there is no uImage4 in armhf
-A=arm
-case "$ARCH" in
-  armhf)   mkimage -A arm -O linux -T kernel -C none -a 0x00200000 -e 0x00200000 -n "Linux kernel" \
-            -d "$ROOTFS_PATH"/boot/vmlinuz-rpi "$ROOTFS_PATH"/boot/uImage
-           sed "s/uImage4/uImage2/" -i "$RES_PATH"/boot.cmd ;;
-  aarch64) A=arm64 ;;
-esac
-[ "$ARCH" != "armhf" ] && mkimage -A "$A" -O linux -T kernel -C none -a 0x00200000 -e 0x00200000 \
-            -n "Linux kernel" -d "$ROOTFS_PATH"/boot/vmlinuz-rpi4 "$ROOTFS_PATH"/boot/uImage4
-
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # create boot FS
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 colour_echo ">> Configure boot FS"
 
 mkdir -p ${BOOTFS_PATH}
-case ${RPI_FIRMWARE_BRANCH} in
-  alpine) FPATH="${ROOTFS_PATH}/boot" ;;
-  *)      download_firmware
-          FPATH="$DPATH/firmware/boot" ;;
+mv ${ROOTFS_PATH}/boot/* ${BOOTFS_PATH}/
+
+echo "ARCH = $ARCH"
+
+#lol no idea if these are right but they seem to work so they can't be _too_ wrong
+case "$ARCH" in
+  armhf)   
+    KERNEL_PACKAGES="linux-rpi linux-rpi2" 
+    cp ${BOOTFS_PATH}/vmlinuz-rpi ${BOOTFS_PATH}/kernel.img
+    cp ${BOOTFS_PATH}/vmlinuz-rpi2 ${BOOTFS_PATH}/kernel7.img
+    echo i have armhf for arch
+    ;;
+  armv7)   
+    KERNEL_PACKAGES="linux-rpi2 linux-rpi4" 
+    cp ${BOOTFS_PATH}/vmlinuz-rpi2 ${BOOTFS_PATH}/kernel7.img
+    cp ${BOOTFS_PATH}/vmlinuz-rpi4 ${BOOTFS_PATH}/kernel7l.img
+    echo i have armv7 for arch
+    ;;
+  aarch64) 
+    cp ${BOOTFS_PATH}/vmlinuz-rpi4 ${BOOTFS_PATH}/kernel8.img
+    echo i have aarch64 for arch
+    ;;
 esac
 
-find "$FPATH" -maxdepth 1 -type f \( -name "*.dat" -o -name "*.elf" -o -name "*.bin" \) \
-  -exec cp {} ${BOOTFS_PATH} \;
+case ${RPI_FIRMWARE_BRANCH} in
+  alpine) FPATH="${ROOTFS_PATH}/boot" 
+          echo "already copied in all of /boot"
+          ;;
 
-# copy linux device trees and overlays to boot
-# determine dtb and overlay path
-DTB_SOURCE_PATH=""
-if find "${ROOTFS_PATH}/boot/dtbs-rpi/" -quit -name "*-rpi-*.dtb" -type f 2>/dev/null; then
-  DTB_SOURCE_PATH="${ROOTFS_PATH}/boot/dtbs-rpi"
-elif find "${ROOTFS_PATH}/boot/" -quit -name "*-rpi-*.dtb" -type f 2>/dev/null; then
-  DTB_SOURCE_PATH="${ROOTFS_PATH}/boot"
-else
-  echo "Could not determine device trees source path!"
-  exit 1
-fi
-cp ${DTB_SOURCE_PATH}/*-rpi-*.dtb ${BOOTFS_PATH}/
+  *)      download_firmware
+          FPATH="$DPATH/firmware/boot" 
+          find "$FPATH" -maxdepth 1 -type f \( -name "*.dat" -o -name "*.elf" -o -name "*.bin" \) \
+            -exec cp {} ${BOOTFS_PATH} \;
+          ;;
+esac
 
-OVERLAY_SOURCE_PATH=""
-if [ -d "${ROOTFS_PATH}/boot/dtbs-rpi/overlays" ]; then
-  OVERLAY_SOURCE_PATH="${ROOTFS_PATH}/boot/dtbs-rpi/overlays"
-elif [ -d "${ROOTFS_PATH}/boot/overlays" ]; then
-  OVERLAY_SOURCE_PATH="${ROOTFS_PATH}/boot/overlays"
-else
-  echo "Could not determine overlay source path!"
-  exit 1
-fi
-cp -r ${OVERLAY_SOURCE_PATH} ${BOOTFS_PATH}/
-colour_echo "contents of uboot" "$Cyan"
+
+colour_echo "contents of /boot" "$Cyan"
 ls -C ${BOOTFS_PATH}
 colour_echo "overlays" "$Cyan"
 ls -C "$BOOTFS_PATH"/overlays
 colour_echo "end of overlays" "$Cyan"
-
-# copy u-boot
-cp /uboot/* ${BOOTFS_PATH}/
-
-# generate boot script
-mkimage -A "$A" -T script -C none -n "Boot script" -d ${RES_PATH}/boot.cmd ${BOOTFS_PATH}/boot.scr
 
 M4ARG="-D xARCH=$ARCH"
 if [ -f "$INPUT_PATH"/m4/hdmi.m4 ]; then
@@ -458,7 +440,7 @@ if [ "$DEFAULT_KERNEL_MODULES" != "*" ]; then
 
   cd "$WORK_PATH"
 else
-  echo "skiped -> keep all modules"
+  echo "skipped -> keep all modules"
 fi
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -478,14 +460,6 @@ fi
 ln -fs /data/etc/resolv.conf ${ROOTFS_PATH}/etc/resolv.conf
 
 rm -rf ${ROOTFS_PATH}/var/cache/apk/*
-rm -rf ${ROOTFS_PATH}/boot/initramfs*
-rm -rf ${ROOTFS_PATH}/boot/System*
-rm -rf ${ROOTFS_PATH}/boot/config*
-rm -rf ${ROOTFS_PATH}/boot/vmlinuz*
-rm -rf ${ROOTFS_PATH}/boot/dtbs-rpi*
-rm -f ${ROOTFS_PATH}/boot/fixup*.dat
-rm -f ${ROOTFS_PATH}/boot/start*.elf
-rm -f ${ROOTFS_PATH}/boot/bootcode.bin
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # create image
@@ -538,7 +512,7 @@ sha256sum ${IMG_NAME}_update.img.gz > ${IMG_NAME}_update.img.gz.sha256
 
 echo
 colour_echo ">> Uncompressed Sizes"
-colour_echo "size of uboot partition: $SIZE_BOOT	| size of files on uboot partition:	$(du -sh ${BOOTFS_PATH} | sed "s/\s.*//")" "$Yellow"
+colour_echo "size of boot partition:  $SIZE_BOOT	| size of files on boot partition:	$(du -sh ${BOOTFS_PATH} | sed "s/\s.*//")" "$Yellow"
 colour_echo "size of root partition:  $SIZE_ROOT_PART" "$Yellow"
 colour_echo "size of root filesystem: $SIZE_ROOT_FS	| size of files on root filesystem:	$(du -sh ${ROOTFS_PATH} | sed "s/\s.*//")" "$Yellow"
 colour_echo "size of data partition:  $SIZE_DATA	| size of files on data partition:	$(du -sh ${DATAFS_PATH} | sed "s/\s.*//")" "$Yellow"
